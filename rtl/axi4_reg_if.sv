@@ -20,7 +20,7 @@
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-interface axi_cfg_if #(
+interface axi4_reg_if #(
     parameter int AXI4_ID_WIDTH_P   = -1,
     parameter int AXI4_ADDR_WIDTH_P = -1,
     parameter int AXI4_DATA_WIDTH_P = -1,
