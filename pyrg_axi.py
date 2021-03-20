@@ -23,7 +23,7 @@
 ################################################################################
 
 import yaml
-import sys, os
+import sys, os, re, math
 import itertools, operator
 from datetime import date
 
@@ -67,31 +67,34 @@ def generate_axi(yaml_file_path):
   # ----------------------------------------------------------------------------
 
   # First information in the file
-  BLOCK_NAME      = block_name
-  #BASE_ADDR       = block_contents['base_addr']
-  #BUS_BYTE_WIDTH  = block_contents['bus_width']
-  BLOCK_ACRONYM   = block_contents['acronym'].upper()
+  BLOCK_NAME    = block_name
+  BUS_BIT_WIDTH = block_contents['bus_width']
 
   # Variables for construction the AXI slave
-  #MODULE_NAME
   rtl_parameters       = [] # Size fields which are strings are considered parameters
   rtl_ports            = [] # We list all ports we generate as tuples (IO, PORT_WIDTH, FIELD_NAME)
   rtl_resets           = [] # If a reset value is specified for a register we add in this list
+
   rtl_cmd_registers    = [] # Save all 'cmd_' registers here, used later to set them to '0' as default
   all_rtl_writes       = "" # Contains the RTL writes
   all_rtl_reads        = "" # Contains the RTL reads
-  all_rtl_rc_update    = "" # Contains the RTL update of RC registers
+  all_mem_writes       = "" # Contains the MEM writes
+  all_rc_registers     = [] # Contains the RC registers
 
   reg_all_fields       = [] # If a register contains 2 or more fields, we save them here because
                             # we need to finish iterating through all fields so we later can make the
-                            # assignment like, e.g., "{f2, f1, f0} <= wdata;"
+                            # assignment like, e.g., "{f2, f1, f0} <= cif.wdata;"
   reg_rc_accessed      = {} # ReadAndClear registers
   reg_rc_declarations  = []
   reg_rom_declarations = []
 
   rtl_parameters.append("AXI_DATA_WIDTH_P")
   rtl_parameters.append("AXI_ADDR_WIDTH_P")
+  rtl_parameters.append("AXI_ID_P")
 
+  if ("parameters" in block_contents.keys()):
+    for p in block_contents['parameters']:
+      rtl_parameters.append(p)
 
   # Iterating through the list of registers
   for reg in block_contents['registers']:
@@ -99,6 +102,10 @@ def generate_axi(yaml_file_path):
     # Register information
     reg_name   = reg['name']
     reg_access = reg['access']
+    if ("repeat" in reg.keys()):
+      reg_repeat = reg["repeat"]
+    else:
+      reg_repeat = 1
 
     # Generate RTL code (for fields) are appended to these
     _reg_writes = []
@@ -108,6 +115,7 @@ def generate_axi(yaml_file_path):
 
     # Check if this register has access type RC (Read and Clear)
     if (reg_access in ["RC"]):
+      all_rc_registers.append(reg_name)
       reg_rc_accessed[reg_name] = []
 
     # --------------------------------------------------------------------------
@@ -130,20 +138,24 @@ def generate_axi(yaml_file_path):
       # If the size is a string, i.e., a constant
       if (isinstance(_field_size, str)):
         _port_width = "[%s-1 : 0]" % (_field_size)
-        rtl_parameters.append(_field_size)
       # If the size is just one bit
       elif (_field_size == 1):
         _port_width = " "
       # Else, any other integer
       else:
-        _port_width = "[%s : 0]" % (str(_field_size-1))
+        _port_width = ""
+        # Register is repeated
+        if (reg_repeat > 1):
+          _port_width += "[%s : 0]" % (reg_repeat - 1)
+        _port_width += "[%s : 0]" % (str(_field_size-1))
+
 
       if (_field_type in ["CR", "CMD"]):
         rtl_ports.append(("    output logic ", _port_width, _field_name))
       elif (_field_type in ["SR", "IRQ"]):
         rtl_ports.append(("    input  wire  ", _port_width, _field_name))
       elif (_field_type in ["ROM"]):
-        reg_rom_declarations.append((_port_width, _field_name))
+        reg_rom_declarations.append((_port_width, _field_name, field['field']['reset_value'], _field_size))
 
       # Declaration of Read and Clear registers
       if (reg_access in ["RC"]):
@@ -155,11 +167,8 @@ def generate_axi(yaml_file_path):
       # Only registers with the key 'reset_value' are appended to this list
       # ------------------------------------------------------------------------
 
-      if ("reset_value" in field['field'].keys()):
+      if ("reset_value" in field['field'].keys() and not _field_type in ["ROM"]):
         rtl_resets.append((_field_name, field['field']['reset_value']))
-
-      if (reg_access in ["RC"]):
-        rtl_resets.append(("rc_" + _field_name, 0))
 
       # ------------------------------------------------------------------------
       # rtl_cmd_registers
@@ -176,6 +185,8 @@ def generate_axi(yaml_file_path):
       # ------------------------------------------------------------------------
 
       _axi_range = ""
+      _wr_indent = 16
+      _rd_indent = 8
 
       # If this register contains only one field
       if nr_of_fields == 1:
@@ -196,19 +207,18 @@ def generate_axi(yaml_file_path):
 
         # Writes
         if (reg_access in ["WO", "RW"]):
-          _write = 12*" " + _field_name + (" <= wdata[%s]" % (_axi_range))
+          _write = _wr_indent*" " + _field_name + (" <= cif.wdata[%s]" % (_axi_range))
           _reg_writes.append(_write)
 
         # Reads
         if (reg_access in ["RO", "RW", "ROM"]):
-          _read = 8*" " + ("rdata_d0[%s] = ") % (_axi_range) + _field_name
+          _read = _rd_indent*" " + ("cif.rdata[%s] = ") % (_axi_range) + _field_name
           _reg_reads.append(_read)
 
         # Read and Clear
         if (reg_access in ["RC"]):
-          reg_rc_accessed[reg_name].append(_field_name)
-          _read  = 6*" " + ("rdata_d0[%s] = rc_") % (_axi_range) + _field_name
-          _read += 6*" " + "rc_" + _field_name + " <= '0"
+          _read  = _rd_indent*" " + ("cif.rdata[%s] = ") % (_axi_range) + _field_name
+          _read += _rd_indent*" " + "clear_" + reg_name + " <= '1"
           _reg_reads.append(_read)
 
       else:
@@ -224,11 +234,9 @@ def generate_axi(yaml_file_path):
         reg_all_fields.append(_field_name)
 
 
-
     # --------------------------------------------------------------------------
-    # End of field the iteration
+    # </end> of field iteration
     # --------------------------------------------------------------------------
-
 
 
     # For register with more than one field we make assignments
@@ -238,11 +246,11 @@ def generate_axi(yaml_file_path):
       _fields_concatenated = ', '.join(reg_all_fields[::-1])
 
       if (reg_access in ["WO", "RW"]):
-        _write = 12*" " + "{" + _fields_concatenated + "} <= wdata"
+        _write = _wr_indent*" " + "{" + _fields_concatenated + "} <= cif.wdata"
         _reg_writes.append(_write)
 
       if (reg_access in ["RO", "RW"]):
-        _read = 12*" " + "rdata_d0 = " + "{" + _fields_concatenated + "}"
+        _read = _rd_indent*" " + "cif.rdata = " + "{" + _fields_concatenated + "}"
         _reg_reads.append(_read)
 
 
@@ -251,45 +259,132 @@ def generate_axi(yaml_file_path):
     # Read And Clear
     if reg_name in reg_rc_accessed.keys() and len(reg_rc_accessed[reg_name]):
 
-      _fields_concatenated    = ", ".join(reg_rc_accessed[reg_name][::-1])
-      _rc_fields_concatenated = "rc_" + ", rc_".join(reg_rc_accessed[reg_name][::-1])
-      # AXI Read operation
-      _read  = 12*" " + "rdata_d0 = " + "{" + _rc_fields_concatenated + "};\n" # Assign the AXI read bus
-      _read += 12*" " + "{" + _rc_fields_concatenated + "} <= '0"             # Clear the "rc_" fields
+      _fields_concatenated = ", ".join(reg_rc_accessed[reg_name][::-1])
+      _read                = _rd_indent*" " + "cif.rdata = " + "{" + _fields_concatenated + "};\n"
+      _read               += _rd_indent*" " + "clear_" + reg_name + " = '1"
       _reg_reads.append(_read)
 
-      # Update of the corresponding "rc_" registers
-      _rc_update  = 6*' ' + "if (|{%s}) begin\n" % _fields_concatenated
-      _rc_update += 6*' ' + "  {%s} <= {%s};\n"  % (_rc_fields_concatenated, _fields_concatenated)
-      _rc_update += 6*' ' + "end\n\n"
-
-
-      all_rtl_rc_update += _rc_update
 
     # Append the register writes and reads
-    _reg_address = "%s_%s_ADDR" % (BLOCK_ACRONYM, reg_name.upper())
+    _reg_address = "%s_ADDR" % (reg_name.upper())
+
+    _wr_indent -= 2
 
     # Generating all the write fields
     if len(_reg_writes):
 
-      _wr_row = 10*" " + _reg_address + ": begin\n"
+      _wr_row = _wr_indent*" " + _reg_address + ": begin\n"
 
       for wr in _reg_writes:
         _wr_row += wr + ";\n"
 
-      _wr_row += 10*" " + "end\n\n"
+      _wr_row += _wr_indent*" " + "end\n\n"
       _reg_writes = []
       all_rtl_writes += _wr_row
 
 
+    _rd_indent -= 2
+
     # Generating all the read fields
     if len(_reg_reads):
-      _rd_row = 6*" " + _reg_address + ": begin\n"
-      for rd in _reg_reads:
-        _rd_row += rd + ";\n"
-      _rd_row += 6*" " + "end\n\n"
+
+      if (reg_repeat > 1):
+
+        _rd_row = ""
+        for i in range(reg_repeat):
+          _reg_address = "%s_%d_ADDR" % (reg_name.upper(), i)
+          _rd_row += _rd_indent*" " + _reg_address + ": begin\n"
+
+          for rd in _reg_reads:
+            _rd_row += rd + "[%d];\n" % i
+          _rd_row += _rd_indent*" " + "end\n\n"
+
+      else:
+
+        _rd_row = _rd_indent*" " + _reg_address + ": begin\n"
+        for rd in _reg_reads:
+          _rd_row += rd + ";\n"
+        _rd_row += _rd_indent*" " + "end\n\n"
+
       _reg_reads = []
       all_rtl_reads  += _rd_row
+
+  # ------------------------------------------------------------------------
+  # </end> of register iteration
+  # ------------------------------------------------------------------------
+
+  RC_DEFAULT = ""
+  for rc in all_rc_registers:
+    rtl_ports.append(("    output logic ", " ", "clear_" + rc))
+    RC_DEFAULT += 4*" " + "clear_" + rc + " = '0;\n"
+
+
+  MEM_DEFAULT = ""
+
+  # Iterating through the list of memories
+  if ('memories' in block_contents.keys()):
+
+    for mem in block_contents['memories']:
+
+      # Memory information
+      mem_name   = mem['name']
+      mem_access = mem['access']
+      mem_size   = mem['size']
+      mem_width  = mem['width']
+
+
+      print("Mem: name=" + mem_name)
+
+      # ------------------------------------------------------------------------
+      # rtl_ports
+      # Deciding the port's width declaration
+      # ------------------------------------------------------------------------
+
+      # In order to use the "awaddr" as the address for memory, we need to add
+      # extra bits because the slave will increase the address by
+      # (BUS_BIT_WIDTH/8) for every beat. Therefore, e.g., for a 64-bit data
+      # bus, a counter's values will essentially be present in the higher bits.
+      _byte_addr_width = math.log2(BUS_BIT_WIDTH/8)
+
+      _port_addr_width = "[%d : 0]" % (math.log2(mem_size) - 1 + _byte_addr_width)
+      _port_data_width = "[%d : 0]" % (mem_width-1)
+
+      rtl_ports.append(("    output logic ", " ", mem_name + "_we"))
+      rtl_ports.append(("    output logic ", _port_addr_width, mem_name + "_addr"))
+      rtl_ports.append(("    output logic ", _port_data_width, mem_name + "_wdata"))
+
+      # ------------------------------------------------------------------------
+      # rtl_resets
+      # Only registers with the key 'reset_value' are appended to this list
+      # ------------------------------------------------------------------------
+
+      rtl_resets.append((mem_name + "_we", 0))
+      rtl_resets.append((mem_name + "_addr", 0))
+      rtl_resets.append((mem_name + "_wdata", 0))
+
+      MEM_DEFAULT += 6*" " + "%s_we    <= '0;\n" % (mem_name)
+      MEM_DEFAULT += 6*" " + "%s_addr  <= '0;\n" % (mem_name)
+      MEM_DEFAULT += 6*" " + "%s_wdata <= '0;\n" % (mem_name)
+
+      # ------------------------------------------------------------------------
+      # all_mem_writes
+      # ------------------------------------------------------------------------
+
+      _mem_addr = "%s_%s_BASE_ADDR" % (BLOCK_NAME.upper(), mem_name.upper())
+      _mem_last_addr = "%s_%s_HIGH_ADDR" % (BLOCK_NAME.upper(), mem_name.upper())
+
+      if (mem_access in ["RW", "WO"]):
+        all_mem_writes += 12*" " + "if (awaddr_r0 >= %s && awaddr_r0 <= %s) begin\n" % (_mem_addr, _mem_last_addr)
+        all_mem_writes += 14*" " + "%s_we    <= '1;\n" % (mem_name)
+        all_mem_writes += 14*" " + "%s_addr  <= awaddr_r0%s;\n" % (mem_name, _port_addr_width)
+        all_mem_writes += 14*" " + "%s_wdata <= cif.wdata%s;\n" % (mem_name, _port_data_width)
+        all_mem_writes += 12*" " + "end\n\n"
+
+      # ------------------------------------------------------------------------
+      # all_mem_reads
+      # ------------------------------------------------------------------------
+      if (mem_access in ["RW", "RO"]):
+        raise Exception("Only writable memories supported yet!")
 
   # ------------------------------------------------------------------------
   # End of register iteration
@@ -304,9 +399,17 @@ def generate_axi(yaml_file_path):
 
   # ------------------------------------------------------------------------
   # rtl_parameters
+  # Involves some regexp in order to remove some functions, e.g., $clog2
   # ------------------------------------------------------------------------
 
   PARAMETERS = ""
+
+  _re = r".*\$.*\((.*)\)"
+  for i in range(len(rtl_parameters)):
+    match = re.match(_re, str(rtl_parameters[i]))
+    if match:
+      rtl_parameters[i] = match.group(1)
+
   rtl_parameters = sort_uniq(rtl_parameters)
 
   for p in rtl_parameters:
@@ -348,19 +451,15 @@ def generate_axi(yaml_file_path):
       longest = len(_port_width)
 
   for reg in reg_rom_declarations:
-    (_port_width, _field_name) = reg
+    (_port_width, _field_name, _, _) = reg
     if (len(_port_width) > longest):
       longest = len(_port_width)
 
   LOGIC_DECLARATIONS = "\n"
 
-  for reg in reg_rc_declarations:
-    (_port_width, _field_name) = reg
-    LOGIC_DECLARATIONS += "  logic " + _port_width.rjust(longest, " ") + " rc_" + _field_name + ";\n"
-
   for reg in reg_rom_declarations:
-    (_port_width, _field_name) = reg
-    LOGIC_DECLARATIONS += "  logic " + _port_width.rjust(longest, " ") + " " + _field_name + ";\n"
+    (_port_width, _field_name, _reset_value, _field_size) = reg
+    LOGIC_DECLARATIONS += "  localparam logic unsigned " + _port_width.rjust(longest, " ") + " " + _field_name + (" = ") + _reset_value + ";\n"
 
   # ------------------------------------------------------------------------
   # rtl_resets
@@ -406,9 +505,11 @@ def generate_axi(yaml_file_path):
   output = output.replace("PORTS",              AXI_PORTS)
   output = output.replace("LOGIC_DECLARATIONS", LOGIC_DECLARATIONS)
   output = output.replace("CMD_REGISTERS",      CMD_DEFAULT)
-  output = output.replace("RC_ASSIGNMENTS",     all_rtl_rc_update)
+  output = output.replace("MEM_INTERFACES",     MEM_DEFAULT)
   output = output.replace("RESETS",             AXI_RESET)
   output = output.replace("AXI_WRITES",         all_rtl_writes)
+  output = output.replace("AXI_MEM_WRITES",     all_mem_writes)
+  output = output.replace("RC_DEFAULT",         RC_DEFAULT)
   output = output.replace("AXI_READS",          all_rtl_reads)
 
   # Write the AXI slave to file

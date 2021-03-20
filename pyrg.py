@@ -41,7 +41,8 @@ if __name__ == '__main__':
 
   for yml in yml_files:
 
-    pyrg_uvm.generate_uvm(yml)
+    uvm_path = '/'.join(yml.split('/')[:-2]) + "/tb/uvm_reg/"
+    pyrg_uvm.generate_uvm(yml, uvm_path)
     pyrg_axi.generate_axi(yml)
 
 
