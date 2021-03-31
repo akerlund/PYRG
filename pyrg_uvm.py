@@ -3,6 +3,7 @@
 ################################################################################
 ##
 ## Copyright (C) 2020 Fredrik Åkerlund
+## https://github.com/akerlund/PYRG
 ##
 ## This program is free software: you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -26,29 +27,13 @@ import yaml
 import sys, os, math
 from datetime import date
 
-def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
+def generate_uvm(yaml_file_path, git_root, addr_width = 16):
 
   this_path           = os.path.dirname(os.path.abspath(sys.argv[0]))
   uvm_reg_file_path   = this_path + "/templates/uvm_reg.sv"
   uvm_block_file_path = this_path + "/templates/uvm_block.sv"
   field_template_path = this_path + "/templates/reg_field.sv"
   header_file_path    = this_path + "/templates/header.txt"
-
-  rtl_path = '/'.join(yaml_file_path.split('/')[:-2]) + "/rtl/"
-  sw_path  = '/'.join(yaml_file_path.split('/')[:-2]) + "/sw/"
-
-  # If the used did not specify a specific path for the UVM files, this is default
-  if (not len(uvm_path)):
-    uvm_path = '/'.join(yaml_file_path.split('/')[:-2]) + "/tb/uvm_reg/"
-
-  if not os.path.exists(rtl_path):
-      os.makedirs(rtl_path)
-
-  if not os.path.exists(uvm_path):
-      os.makedirs(uvm_path)
-
-  if not os.path.exists(sw_path):
-      os.makedirs(sw_path)
 
   # ----------------------------------------------------------------------------
   # Loading in the templates
@@ -75,72 +60,80 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
   # ----------------------------------------------------------------------------
 
   # Variables for storing the YAML file contents
-  block_name     = None
-  block_contents = None
+  top_name    = None
+  yml_entries = None
 
   with open(yaml_file_path, 'r') as file:
+    yaml_reg              = yaml.load(file, Loader = yaml.FullLoader)
+    top_name, yml_entries = list(yaml_reg.items())[0]
 
-    yaml_reg = yaml.load(file, Loader = yaml.FullLoader)
+  # ----------------------------------------------------------------------------
+  # Extracting the user defined paths
+  # ----------------------------------------------------------------------------
 
-    block_name, block_contents = list(yaml_reg.items())[0]
+  rtl_path = yml_entries["rtl_path"].replace("$GIT_ROOT", git_root)
+  uvm_path = yml_entries["uvm_path"].replace("$GIT_ROOT", git_root)
+  sw_path  = yml_entries["sw_path"].replace("$GIT_ROOT",  git_root)
+
+  if not os.path.exists(rtl_path):
+    os.makedirs(rtl_path)
+
+  if not os.path.exists(uvm_path):
+    os.makedirs(uvm_path)
+
+  if not os.path.exists(sw_path):
+    os.makedirs(sw_path)
 
   # ----------------------------------------------------------------------------
   # PART 1
-  # Creating all register classes and their uvm_reg_field's
+  # Creating all register classes (uvm_reg) and their fields (uvm_reg_field).
+  # We are also creating the constants (SV) and defines (C) for the register's
+  # addresses. Each register's name is saved in a list which is used later to
+  # create the register slave's block (uvm_reg_block).
   # ----------------------------------------------------------------------------
 
-  # First information in the file
-  BLOCK_NAME    = block_name
-  BASE_ADDR     = "0"
-  BUS_BIT_WIDTH = block_contents['bus_width']
-  ACRONYM       = BLOCK_NAME.upper()
-
-  # Variable used
-  UVM_BUILD              = ""
-
-  register_names         = [] # Used later to generate the register block
-  address_map            = []
-  c_address_map          = []
-
-  # We are saving the generated "uvm_reg" classes in this variable
-  reg_classes = header
-
+  reg_classes    = header
+  register_names = [] # Tuple list
+  sv_address_map = [] # localparams
+  c_address_map  = [] # defines
 
   # Iterating through the list of registers
-  for reg in block_contents['registers']:
+  for reg in yml_entries['registers']:
 
-    reg_name   = reg['name']
-    reg_access = "\"" + reg['access'] + "\""
-    reg_class  = uvm_reg.replace("CLASS_DESCRIPTION", reg['desc'])
+    _reg_name   = reg['name']
+    _reg_access = "\"" + reg['access'] + "\""
+    _reg_class  = uvm_reg.replace("CLASS_DESCRIPTION", reg['desc'])
+    _reg_block_body = ""
+
+    # Registers can be repeated with the same name but different numeric suffix
     if ("repeat" in reg.keys()):
-      reg_repeat = reg["repeat"]
-      _ri = "_0" # Repeat suffix of names
+      _reg_repeat = reg["repeat"]
+      _ri         = "_0" # Repeat index
     else:
-      reg_repeat = 1
-      _ri        = ""
+      _reg_repeat = 1
+      _ri         = ""
 
-    if reg_repeat > 1:
-      for i in range(reg_repeat):
-        register_names.append((reg_name+_ri, reg_access))
-        address_map.append("  localparam logic [%d : 0] %s_%d_ADDR" % (addr_width-1, reg_name.upper(), i))
-        c_address_map.append("  #define %s_%d_ADDR" % (reg_name.upper(), i))
+    if _reg_repeat > 1:
+      for i in range(_reg_repeat):
+        register_names.append((_reg_name+_ri, _reg_access))
+        sv_address_map.append("  localparam logic [%d : 0] %s_%d_ADDR" % (addr_width-1, _reg_name.upper(), i))
+        c_address_map.append("  #define %s_%d_ADDR" % (_reg_name.upper(), i))
         _ri = "_" + str(i+1)
       _ri = "_0"
     else:
-      register_names.append((reg_name, reg_access))
-      address_map.append("  localparam logic [%d : 0] %s_ADDR" % (addr_width-1, reg_name.upper()))
-      c_address_map.append("  #define %s_ADDR" % (reg_name.upper()))
+      register_names.append((_reg_name, _reg_access))
+      sv_address_map.append("  localparam logic [%d : 0] %s_ADDR" % (addr_width-1, _reg_name.upper()))
+      c_address_map.append("  #define %s_ADDR" % (_reg_name.upper()))
 
-    reg_field_declarations = ""
+    _reg_field_declarations = ""
+    _reg_total_size        = ""
 
-    _reg_total_size = ""
-
-    # Generating the fields of the register
-    for i in range(reg_repeat):
+    # Generating the fields (uvm_reg_field) of the register
+    for i in range(_reg_repeat):
 
       for field in reg['bit_fields']:
 
-        reg_field_declarations += "  rand uvm_reg_field %s%s;\n" % (field['field']['name'], _ri)
+        _reg_field_declarations += "  rand uvm_reg_field %s%s;\n" % (field['field']['name'], _ri)
 
         _field_instance    = "%s%s = uvm_reg_field::type_id::create(\"%s%s\");" % (field['field']['name'], _ri, field['field']['name'], _ri)
         _field_description = field['field']['description']
@@ -155,8 +148,7 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
         _reg_field = _reg_field.replace("FIELD_NAME",        _field_name)
         _reg_field = _reg_field.replace("FIELD_SIZE",        _field_size)
         _reg_field = _reg_field.replace("FIELD_LSB_POS",     _field_lsb_pos)
-        _reg_field = _reg_field.replace("FIELD_ACCESS",      reg_access)
-
+        _reg_field = _reg_field.replace("FIELD_ACCESS",      _reg_access)
 
         if ("reset_value" in field['field'].keys()):
           _reg_field = _reg_field.replace("FIELD_RESET",     str(field['field']['reset_value']))
@@ -165,26 +157,26 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
           _reg_field = _reg_field.replace("FIELD_RESET",     str(0))
           _reg_field = _reg_field.replace("FIELD_HAS_RESET", str(0))
 
-        UVM_BUILD += _reg_field
+        _reg_block_body += _reg_field
 
 
 
-      reg_class = reg_class.replace("REG_NAME",               (reg_name + _ri + "_reg"))
-      reg_class = reg_class.replace("UVM_FIELD_DECLARATIONS", reg_field_declarations)
-      reg_class = reg_class.replace("UVM_REG_SIZE",           _reg_total_size[:-1]) # Not all bits need to be implemented.
-      reg_class = reg_class.replace("UVM_BUILD",              UVM_BUILD)
+      _reg_class = _reg_class.replace("REG_NAME",               (_reg_name + _ri + "_reg"))
+      _reg_class = _reg_class.replace("UVM_FIELD_DECLARATIONS", _reg_field_declarations)
+      _reg_class = _reg_class.replace("UVM_REG_SIZE",           _reg_total_size[:-1]) # Not all bits need to be implemented.
+      _reg_class = _reg_class.replace("UVM_BUILD",              _reg_block_body)
 
-      reg_classes += reg_class
-      UVM_BUILD    = ""
+      reg_classes += _reg_class
+      _reg_block_body    = ""
 
-      if reg_repeat > 1:
-        reg_class  = uvm_reg.replace("CLASS_DESCRIPTION", reg['desc'])
-        reg_field_declarations = ""
-        _reg_total_size = ""
-        _ri = "_" + str(i+1)
+      if _reg_repeat > 1:
+        _reg_class  = uvm_reg.replace("CLASS_DESCRIPTION", reg['desc'])
+        _reg_field_declarations = ""
+        _reg_total_size         = ""
+        _ri                     = "_" + str(i+1)
 
   # Write the register classes to file
-  output_file = uvm_path + BLOCK_NAME + "_reg.sv"
+  output_file = uvm_path + '/' + top_name + "_reg.sv"
   with open(output_file, 'w') as file:
     file.write(reg_classes)
 
@@ -199,21 +191,21 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
   c_memories  = []
 
   # Iterating through the list of memories
-  if ('memories' in block_contents.keys()):
+  if ('memories' in yml_entries.keys()):
 
-    for mem in block_contents['memories']:
+    for mem in yml_entries['memories']:
 
       # Memory information
       mem_name   = mem['name']
       mem_access = mem['access']
       mem_size   = mem['size']
 
-      _mem_base_addr = "  localparam logic [%d : 0] %s_%s_BASE_ADDR = " % (addr_width-1, ACRONYM, mem_name.upper())
-      _mem_high_addr = "  localparam logic [%d : 0] %s_%s_HIGH_ADDR = " % (addr_width-1, ACRONYM, mem_name.upper())
+      _mem_base_addr = "  localparam logic [%d : 0] %s_%s_BASE_ADDR = " % (addr_width-1, top_name.upper(), mem_name.upper())
+      _mem_high_addr = "  localparam logic [%d : 0] %s_%s_HIGH_ADDR = " % (addr_width-1, top_name.upper(), mem_name.upper())
       sv_memories.append((mem_size, _mem_base_addr, _mem_high_addr))
 
-      _mem_base_addr = "  #define %s_%s_BASE_ADDR " % (ACRONYM, mem_name.upper())
-      _mem_high_addr = "  #define %s_%s_HIGH_ADDR " % (ACRONYM, mem_name.upper())
+      _mem_base_addr = "  #define %s_%s_BASE_ADDR " % (top_name.upper(), mem_name.upper())
+      _mem_high_addr = "  #define %s_%s_HIGH_ADDR " % (top_name.upper(), mem_name.upper())
       c_memories.append((mem_size, _mem_base_addr, _mem_high_addr))
 
       # ------------------------------------------------------------------------
@@ -229,24 +221,24 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
   # Creating the System Verilog address map
   # ----------------------------------------------------------------------------
 
-  _bus_bytes = int(bus_bit_width/8)
+  _bus_bytes = int(yml_entries['bus_width']/8)
 
   longest_name = 0
-  for addr in address_map:
+  for addr in sv_address_map:
     if len(addr) > longest_name:
       longest_name = len(addr)
 
   _i = 0
-  for i in range(len(address_map)):
-    address_map[i] = address_map[i].ljust(longest_name, " ") + (" = %d'h" % (addr_width)) + str(hex(i*_bus_bytes)[2:].zfill(4)).upper() + ";\n"
+  for i in range(len(sv_address_map)):
+    sv_address_map[i] = sv_address_map[i].ljust(longest_name, " ") + (" = %d'h" % (addr_width)) + str(hex(i*_bus_bytes)[2:].zfill(4)).upper() + ";\n"
     _i = i
 
-  ADDRESS_HIGH = (("  localparam logic [%d : 0] " % (addr_width-1)) + ACRONYM + "_HIGH_ADDRESS").ljust(longest_name, " ") + (" = %d'h" % (addr_width)) + str(hex(len(address_map)*_bus_bytes)[2:].zfill(4)).upper() + ";\n"
+  ADDRESS_HIGH = (("  localparam logic [%d : 0] " % (addr_width-1)) + top_name.upper() + "_HIGH_ADDRESS").ljust(longest_name, " ") + (" = %d'h" % (addr_width)) + str(hex(len(sv_address_map)*_bus_bytes)[2:].zfill(4)).upper() + ";\n"
 
   # Adding memories and aligning the lower bits to the size of the memory as the address field of the interface
   # is used, too
   _latex = []
-  _aligned_mem_addr = len(address_map) * _bus_bytes
+  _aligned_mem_addr = len(sv_address_map) * _bus_bytes
   for m in sv_memories:
     (mem_size, _mem_base_addr, _mem_high_addr) = m
     mem_size_log2  = int(math.ceil(math.log2(mem_size)))
@@ -259,26 +251,26 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
     _latex.append((str(hex(_aligned_mem_addr)[2:].zfill(4)).upper(),
                    str(hex(_aligned_mem_addr + mem_size * _bus_bytes)[2:].zfill(4)).upper())
                  )
-    address_map.append(_mem_base_addr + ("%d'h" % (addr_width)) + str(hex(_aligned_mem_addr)[2:].zfill(4)).upper() + ";\n")
-    address_map.append(_mem_high_addr + ("%d'h" % (addr_width)) + str(hex(_aligned_mem_addr + mem_size * _bus_bytes)[2:].zfill(4)).upper() + ";\n")
+    sv_address_map.append(_mem_base_addr + ("%d'h" % (addr_width)) + str(hex(_aligned_mem_addr)[2:].zfill(4)).upper() + ";\n")
+    sv_address_map.append(_mem_high_addr + ("%d'h" % (addr_width)) + str(hex(_aligned_mem_addr + mem_size * _bus_bytes)[2:].zfill(4)).upper() + ";\n")
     _aligned_mem_addr += mem_size * _bus_bytes
 
 
   pkt_top  = "\n"
-  pkt_top += "`ifndef %s\n"   % (BLOCK_NAME.upper() + "_ADDRESS_PKG")
-  pkt_top += "`define %s\n" % (BLOCK_NAME.upper() + "_ADDRESS_PKG")
+  pkt_top += "`ifndef %s\n"   % (top_name.upper() + "_ADDRESS_PKG")
+  pkt_top += "`define %s\n" % (top_name.upper() + "_ADDRESS_PKG")
   pkt_top += "\n"
-  pkt_top += "package %s;\n\n" % (BLOCK_NAME + "_address_pkg")
+  pkt_top += "package %s;\n\n" % (top_name + "_address_pkg")
 
   pkt_bot  = "\n\n"
   pkt_bot  = "\nendpackage\n\n`endif\n"
 
-  output_file = rtl_path + BLOCK_NAME + "_address_pkg.sv"
+  output_file = rtl_path + '/' + top_name + "_address_pkg.sv"
   with open(output_file, 'w') as file:
     file.write(header)
     file.write(pkt_top)
     file.write(ADDRESS_HIGH)
-    file.write(''.join(address_map))
+    file.write(''.join(sv_address_map))
     file.write(pkt_bot)
 
   print("INFO [pyrg] Generated %s" % output_file)
@@ -298,10 +290,10 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
 
   for i in range(len(c_address_map)):
     c_address_map[i] = c_address_map[i].ljust(longest_name, " ") +\
-                       " " + ACRONYM + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(i*_bus_bytes)[2:].zfill(4)).upper()
+                       " " + top_name.upper() + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(i*_bus_bytes)[2:].zfill(4)).upper()
 
-  ADDRESS_HIGH = ("  #define " + ACRONYM + "_HIGH_ADDRESS").ljust(longest_name, " ") +\
-                  " " + ACRONYM + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(len(c_address_map)*_bus_bytes)[2:].zfill(4)).upper()
+  ADDRESS_HIGH = ("  #define " + top_name.upper() + "_HIGH_ADDRESS").ljust(longest_name, " ") +\
+                  " " + top_name.upper() + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(len(c_address_map)*_bus_bytes)[2:].zfill(4)).upper()
 
   # Adding memories and aligning the lower bits to the size of the memory as the address field of the interface
   # is used, too
@@ -310,18 +302,18 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
     (mem_size, _mem_base_addr, _mem_high_addr) = m
     mem_size_log2 = int(math.ceil(math.log2(mem_size)))
     _aligned_mem_addr = ((_aligned_mem_addr + 2**(mem_size_log2+bus_bytes_log2)) >> (mem_size_log2+bus_bytes_log2)) << (mem_size_log2+bus_bytes_log2)
-    c_address_map.append(_mem_base_addr + ACRONYM + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(_aligned_mem_addr))[2:].zfill(4).upper())
-    c_address_map.append(_mem_high_addr + ACRONYM + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(_aligned_mem_addr + mem_size * _bus_bytes))[2:].zfill(4).upper())
+    c_address_map.append(_mem_base_addr + top_name.upper() + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(_aligned_mem_addr))[2:].zfill(4).upper())
+    c_address_map.append(_mem_high_addr + top_name.upper() + "_PHYSICAL_ADDRESS_C +" + " 0x%s\n" % str(hex(_aligned_mem_addr + mem_size * _bus_bytes))[2:].zfill(4).upper())
     _aligned_mem_addr += mem_size * _bus_bytes
 
   pkt_top  = ""
-  pkt_top += "#ifndef %s\n" % (BLOCK_NAME.upper() + "_ADDRESS_H")
-  pkt_top += "#define %s\n" % (BLOCK_NAME.upper() + "_ADDRESS_H")
+  pkt_top += "#ifndef %s\n" % (top_name.upper() + "_ADDRESS_H")
+  pkt_top += "#define %s\n" % (top_name.upper() + "_ADDRESS_H")
   pkt_top += "\n"
 
   pkt_bot  = "\n#endif\n"
 
-  output_file = sw_path + BLOCK_NAME + "_address.h"
+  output_file = sw_path + '/' + top_name + "_address.h"
   with open(output_file, 'w') as file:
     file.write(header)
     file.write(pkt_top)
@@ -341,18 +333,18 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
   # ----------------------------------------------------------------------------
 
   UVM_REG_DECLARATIONS = ""
-  UVM_BUILD            = ""
+  reg_block_body            = ""
   UVM_ADD              = ""
   offset   = 0
-  MAP_NAME = "\"" + BLOCK_NAME + "_map\""
+  MAP_NAME = "\"" + top_name + "_map\""
 
   for (reg, access) in register_names:
 
     UVM_REG_DECLARATIONS += "  rand %s_reg %s;\n" % (reg, reg)
 
-    UVM_BUILD += "    %s = %s_reg::type_id::create(\"%s\");\n" % (reg, reg, reg)
-    UVM_BUILD += "    %s.build();\n" % (reg)
-    UVM_BUILD += "    %s.configure(this);\n\n" % (reg)
+    reg_block_body += "    %s = %s_reg::type_id::create(\"%s\");\n" % (reg, reg, reg)
+    reg_block_body += "    %s.build();\n" % (reg)
+    reg_block_body += "    %s.configure(this);\n\n" % (reg)
 
     _access = ""
     if 'R' in access:
@@ -365,20 +357,20 @@ def generate_uvm(yaml_file_path, uvm_path, bus_bit_width = 64, addr_width = 16):
 
     UVM_ADD += "    default_map.add_reg(%s, %d, %s);\n" % (reg, offset, _access)
 
-    offset += int(BUS_BIT_WIDTH/8)
+    offset += int(yml_entries['bus_width']/8)
 
   block = header + uvm_block
-  block = block.replace("CLASS_NAME",           (BLOCK_NAME + "_block"))
+  block = block.replace("CLASS_NAME",           (top_name + "_block"))
   block = block.replace("UVM_REG_DECLARATIONS", UVM_REG_DECLARATIONS)
-  block = block.replace("UVM_BUILD",            UVM_BUILD)
+  block = block.replace("UVM_BUILD",            reg_block_body)
   block = block.replace("MAP_NAME",             MAP_NAME)
-  block = block.replace("BASE_ADDR",            BASE_ADDR)
-  block = block.replace("BUS_BIT_WIDTH",        str(int(BUS_BIT_WIDTH/8)))
+  block = block.replace("BASE_ADDR",            "0")
+  block = block.replace("BUS_BIT_WIDTH",        str(int(yml_entries['bus_width']/8)))
   block = block.replace("UVM_ADD",              UVM_ADD)
 
 
   # Write the register block to file
-  output_file = uvm_path + BLOCK_NAME + "_block.sv"
+  output_file = uvm_path + '/' + top_name + "_block.sv"
   with open(output_file, 'w') as file:
     file.write(block)
 

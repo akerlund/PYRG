@@ -3,6 +3,7 @@
 ################################################################################
 ##
 ## Copyright (C) 2020 Fredrik Åkerlund
+## https://github.com/akerlund/PYRG
 ##
 ## This program is free software: you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -268,24 +269,36 @@ def generate_axi(yaml_file_path):
     # Append the register writes and reads
     _reg_address = "%s_ADDR" % (reg_name.upper())
 
-    _wr_indent -= 2
 
     # Generating all the write fields
+    _wr_indent -= 2
     if len(_reg_writes):
 
-      _wr_row = _wr_indent*" " + _reg_address + ": begin\n"
+      if (reg_repeat > 1):
 
-      for wr in _reg_writes:
-        _wr_row += wr + ";\n"
+        _wr_row = ""
+        for i in range(reg_repeat):
+          _reg_address = "%s_%d_ADDR" % (reg_name.upper(), i)
+          _wr_row += _wr_indent*" " + _reg_address + ": begin\n"
 
-      _wr_row += _wr_indent*" " + "end\n\n"
+          for wr in _reg_writes:
+            _wr_row += wr + ";\n"
+          _wr_row += _wr_indent*" " + "end\n\n"
+
+      else:
+
+        _wr_row = _wr_indent*" " + _reg_address + ": begin\n"
+        for wr in _reg_writes:
+          _wr_row += wr + ";\n"
+
+        _wr_row += _wr_indent*" " + "end\n\n"
+
       _reg_writes = []
       all_rtl_writes += _wr_row
 
 
-    _rd_indent -= 2
-
     # Generating all the read fields
+    _rd_indent -= 2
     if len(_reg_reads):
 
       if (reg_repeat > 1):

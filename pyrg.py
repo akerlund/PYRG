@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-
 ################################################################################
 ##
 ## Copyright (C) 2020 Fredrik Åkerlund
+## https://github.com/akerlund/PYRG
 ##
 ## This program is free software: you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@
 ##
 ################################################################################
 
-import os, sys, shutil, glob
+import os, sys, shutil, glob, subprocess
 import pyrg_uvm
 import pyrg_axi
 
@@ -29,6 +29,7 @@ import pyrg_axi
 if __name__ == '__main__':
 
   this_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+  git_root  = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
 
   if (len(sys.argv) != 2):
     sys.exit("ERROR [yml] Provide a YML file with register definitions")
@@ -42,7 +43,7 @@ if __name__ == '__main__':
   for yml in yml_files:
 
     uvm_path = '/'.join(yml.split('/')[:-2]) + "/tb/uvm_reg/"
-    pyrg_uvm.generate_uvm(yml, uvm_path)
+    pyrg_uvm.generate_uvm(yml, git_root)
     pyrg_axi.generate_axi(yml)
 
 
