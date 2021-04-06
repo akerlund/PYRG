@@ -131,14 +131,14 @@ def generate_axi(yaml_file_path):
       _field_type    = _field_name.split("_")[0].upper() # Register have names, e.g., prefix_block_register
 
       # rtl_ports
+      _port_width = ""
+      if (reg_repeat > 1):
+        _port_width += "[%s : 0] " % (reg_repeat - 1)
       if (isinstance(_field_size, str)): # If the size is a string, i.e., a constant
-        _port_width = "[%s-1 : 0]" % (_field_size)
+        _port_width += "[%s-1 : 0]" % (_field_size)
       elif (_field_size == 1):           # If the size is just one bit
-        _port_width = " "
+        _port_width += " "
       else:                              # Else, any other integer
-        _port_width = ""
-        if (reg_repeat > 1):
-          _port_width += "[%s : 0]" % (reg_repeat - 1)
         _port_width += "[%s : 0]" % (str(_field_size-1))
 
       if (_field_type in ["CR", "CMD"]):
