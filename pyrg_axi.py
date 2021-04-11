@@ -154,7 +154,11 @@ def generate_axi(yaml_file_path):
 
       # rtl_resets
       if ("reset_value" in field['field'].keys() and not _field_type in ["ROM"]):
-        rtl_resets.append((_field_name, field['field']['reset_value']))
+        if (reg_repeat > 1):
+          for i in range(reg_repeat):
+            rtl_resets.append(((_field_name+"[%d]"%i), field['field']['reset_value']))
+        else:
+          rtl_resets.append((_field_name, field['field']['reset_value']))
 
       # rtl_cmd_registers
       if (_field_type in ["CMD"]):
