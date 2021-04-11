@@ -256,7 +256,8 @@ def generate_axi(yaml_file_path):
           _wr_row += _wr_indent*" " + _reg_address + ": begin\n"
 
           for wr in _reg_writes:
-            _wr_row += wr + ";\n"
+            _wr_split = wr.split(" <=")
+            _wr_row += _wr_split[0] + ("[%d] <=" % i) + _wr_split[1] + ";\n"
           _wr_row += _wr_indent*" " + "end\n\n"
       else:
 
